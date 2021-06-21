@@ -1,0 +1,1448 @@
+---
+title: "DHE_analysis_prep"
+output: html_document
+---
+
+This is prepping the outputs of DADA2 for 16s analysis (alpha, beta, differntial abundance etc). 
+Sections are as follows
+
+1. Combining of lanes
+I ran seperate DADA2 pipelines for the 2 MiSeq runs due to error models being generated for sequencing lanes. I also ran taxonomy classification seperately (although for future projects i will combine and run taxonomy classification so to avoid some of the steps I had to do below.)
+
+
+2. Fixing ASVs from lanes with different taxonomic classifications
+As I joined after assigning taxonomy, there are some ASVs which have the same ASV sequence, but different taxonomy. Please note that these taxonomies are identical just they assign to different taxonomic levels (i.e. ASVx is same as ASVy in sequence, ASVx annotates to genus, while ASVy annotates to family). I therfore used the highest taxonomic classification ASV and added the counts to this one. I then removed the ASV which had higher lower taxonomy. 
+
+
+3. Removing Low Count Samples
+From literature I am seeing that samples with < 1000 counts are dropped. Therfore I do this step here :). 
+
+
+4. Phylogenetic Tree Construction
+I generated the phylogenetic tree here so it included all ASVs identified from DADA2 (using phangorn). This is very computationally expensive and took ~2 days using the desktop MAC. I did this here so that i could identify unannotated ASVs from SILVA which groupeded with Mitochondira and Chloroplast. 
+
+
+5. Removal of Mitochondria and Chloroplast ASVs
+As with all coral 16s research, removal of the ASVs annotated to mitochondria and chloroplast are removed. Thus I do that here with ones which annotated with SILVA to these, as well as using the phylogenetic tree to remove NA ASVs which cluster within the branches of the annotated Mitochondria and Chloroplast. 
+
+
+6. NAs for Blasting 
+So the taxonomy with SILVA left a fair amount of the ASVs with NAs, therfore I am blasting them against the nt NCBI database to try and get better taxonomies. Here I used NCBI local on the desktop, and then imported into R and used taxonomizr to get full taxonomies. 
+
+
+7. Checking Samples
+After the ASV and sample filtering I just wanted to get an idea of samples on sampling dates. Nothing fancy here just an FYI. 
+
+
+```{r}
+# #Clear plots
+# if(!is.null(dev.list())) dev.off()
+# 
+# # Clear console
+# cat("\014") 
+# 
+# # Clean workspace
+# rm(list=ls())
+```
+
+```{r package loading, include = F}
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("")
+#install.packages('devtools')
+#install.packages('rlang')
+#devtools::install_github('ggloor/CoDaSeq/CoDaSeq')
+
+library(zCompositions)
+library(phyloseq)
+library(vegan)
+library(DESeq2)
+library(tidyverse)
+library(dendextend)
+library(viridis)
+library(reshape)
+library(seqRFLP)
+library(phangorn)
+library(ape)
+library(dada2)
+library(DECIPHER)
+library(ggtree)
+library(compare)
+library(ALDEx2)
+library(CoDaSeq)
+library(ggdendro)
+library(factoextra)
+library(PCAtools)
+library(taxonomizr)
+```
+
+### Lane 921
+
+```{r read in count, include=F}
+read.table(
+  file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/lane1_921/dada2_output/ASVs_counts_921.tsv",
+  header = T,
+  row.names = 1,
+  check.names = F
+) %>% 
+  t() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "header") %>% 
+#  mutate(Lane = "401") %>% 
+  column_to_rownames(var = "header") %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "ASV_number") -> count_921
+
+#View(count_921)
+#str(count_921)
+```
+
+
+```{r read in taxonomy, include=F}
+read.table(
+  file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/lane1_921/dada2_output/ASVs_taxonomy_921.tsv",
+  header = T,
+  row.names = 1,
+  check.names = F,
+  sep = "\t"
+) %>% 
+  rownames_to_column(var = "ASV_number") -> tax_921
+
+#View(tax_921)
+#str(tax_921)
+```
+
+
+```{r read in fasta, include=F}
+fa_921 <- read.table(file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/lane1_921/dada2_output/ASV_921.fa")
+#View(fa_921)
+```
+
+
+```{r Splitting fasta correctly, include=F}
+fa_921 %>% 
+  group_by(grp = str_c('Column', rep(1:2, length.out = n()))) %>% 
+  mutate(rn = row_number()) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = grp, values_from = V1) %>% 
+  mutate(Column1 = str_remove_all(Column1, ">"),
+         ASV_number = Column1, 
+         Sequence = Column2) %>% 
+  dplyr::select(-rn, -Column1, -Column2) -> fa_921_long
+
+#View(fa_921_long)
+```
+
+
+```{r joining to form meta 401 with everything}
+count_921 %>% 
+  full_join(tax_921, by = "ASV_number", copy = T) %>% 
+  full_join(fa_921_long, by = "ASV_number", copy = T) %>% 
+  column_to_rownames(var = "ASV_number") -> complete_921
+
+#View(complete_921)
+```
+
+```{r}
+# save(complete_921, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/lane921_allinfo.RData")
+```
+
+
+### Lane 925
+
+Need to do additional filtering to remove Mike and Brielle samples here
+Columns 132 to 176 contain these, include dplyr::select and remove these. 
+
+```{r read in count, include=F}
+read.table(
+  file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/lane2_925/dada2_ouput/ASVs_counts_925.tsv",
+  header = T,
+  row.names = 1,
+  check.names = F
+) %>% 
+  t() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "header") %>% 
+#  mutate(Lane = "925") %>% 
+  column_to_rownames(var = "header") %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "ASV_number") %>% 
+  dplyr::select(-132:-176) -> count_925
+
+#View(count_925)
+str(count_925)
+```
+
+```{r read in taxonomy, include=F}
+read.table(
+  file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/lane2_925/dada2_ouput/ASVs_taxonomy_925.tsv",
+  header = T,
+  row.names = 1,
+  check.names = F,
+  sep = "\t"
+) %>% 
+  rownames_to_column(var = "ASV_number") -> tax_925
+
+#View(tax_925)
+str(tax_925)
+```
+
+```{r read in fasta, include=F}
+fa_925 <- read.table(file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/lane2_925/dada2_ouput/ASV_925.fa")
+#View(fa_925)
+```
+
+```{r Splitting fasta correctly, include=F}
+fa_925 %>% 
+  group_by(grp = str_c('Column', rep(1:2, length.out = n()))) %>% 
+  mutate(rn = row_number()) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = grp, values_from = V1) %>% 
+  mutate(Column1 = str_remove_all(Column1, ">"),
+         ASV_number = Column1, 
+         Sequence = Column2) %>% 
+  dplyr::select(-rn, -Column1, -Column2) -> fa_925_long
+```
+
+```{r joining to form meta 925 with everything, include = F}
+count_925 %>% 
+  full_join(tax_925, by = "ASV_number", copy = T) %>% 
+  full_join(fa_925_long, by = "ASV_number", copy = T) %>% 
+  column_to_rownames(var = "ASV_number") -> complete_925
+
+#View(complete_925)
+```
+
+```{r saving 925 lane, include = F}
+# save(complete_925, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/lane925_allinfo.RData")
+```
+
+
+### Merging 401 and 408
+
+```{r merging, include=T}
+complete_921 %>%
+  rownames_to_column(var = "ASV_number") %>%
+  dplyr::select(-ASV_number) %>%
+  full_join(
+    complete_925 %>%
+      rownames_to_column(var = "ASV_number") %>%
+      dplyr::select(-ASV_number),
+    by = c(
+      "Sequence",
+      "domain",
+      "phylum",
+      "class",
+      "order",
+      "family",
+      "genus",
+      "species"
+    ),
+    copy = T
+  ) %>% 
+  mutate(obs = "ASV",
+         observation = 1:n()) %>%
+  unite(ASV_number, obs, observation, sep = "_") %>%
+  dplyr::select(
+    ASV_number,
+    domain,
+    phylum,
+    class,
+    order,
+    family,
+    genus,
+    species,
+    Sequence,
+    everything()
+  ) -> combined_DHE
+
+# some seauences not annotated to the same using Silva, need to fix these manually 
+
+#View(combined_DHE)
+nrow(combined_DHE)
+nrow(complete_921)
+nrow(complete_925)
+ncol(combined_DHE)
+ncol(complete_921)
+ncol(complete_925)
+```
+
+*ASVS (rows)*
+combined_DHE -> 10151 ASVs
+921 -> 4733 ASVs
+925 -> 7641 ASVs
+
+*Samples (columns)*
+combined_DHE -> 344
+921 -> 198
+925 -> 153
+
+
+# 2. Fixing ASVs from lanes with different taxonomic classifications
+
+DHE_duplicated_for_Addition generation
+1. Ordered by sequence
+2. Checked each duplicate sequence identical
+3. copied most complete taxonomic classification for each duplicated sequence
+4. copied counts from na row to row above (i.e. complete count for the one asv)
+5. generated a column with same ASV classification for each duplicated sequence
+
+Filtering in R 
+1. filter combined_DHE by all the ASVs present in the ASV_remove column 
+2. select (using filter) every odd row (this has completed counts and no NAs in it)
+3. combine this with the combined DHE to make the completed combined_DHE
+
+```{r}
+# combined_DHE %>% 
+#   filter(duplicated(Sequence) | duplicated(Sequence, fromLast = T)) %>% 
+#   write.csv(., file = "~/Desktop/DHE_dup_seq_combined_all.csv")
+
+corrected_taxa <- read.csv(file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/dup_ASVs_fixed_for_analysis/DHE_duplicated_for_addition.csv", 
+                           check.names = F)
+
+## making filtering object to remove all duplicated sequences
+corrected_taxa %>% 
+  column_to_rownames(var = "ASV_remove") %>% 
+  rownames() -> combDHEfilter
+
+## removing duplicated from combined_DHE
+## doing this removes 384 which is the same nrow of the corrected taxa file
+nrow(combined_DHE)
+combined_DHE %>%
+  filter(!ASV_number %in% combDHEfilter) -> combined_DHE_dupfilt
+nrow(combined_DHE_dupfilt)
+nrow(corrected_taxa)
+
+## removing the ASV_Remove and seleccting only odd rows from corrected and then full joining with DHE_combined
+all(colnames(corrected_taxa %>% dplyr::select(-ASV_remove, -1)) == colnames(combined_DHE_dupfilt))
+
+corrected_taxa %>% 
+  dplyr::select(-ASV_remove, -1) %>%
+  filter(row_number() %% 2 == 1) %>% 
+  rbind(combined_DHE_dupfilt) -> combined_DHE_dupfilt_DONE
+
+nrow(combined_DHE_dupfilt_DONE)
+ncol(combined_DHE_dupfilt_DONE)
+9767 + 384/2
+
+combined_DHE <- combined_DHE_dupfilt_DONE
+```
+
+Original combined_DHE -> 10151 ASVs
+De-duplicated combined_DHE -> 9959 ASVs
+
+Matches up as well when we do 9767 + (284/2) = 9959 :)
+
+Column names of corrected taxa match the combined_DHE filter which is also great news. 
+
+
+# 3. Removing Low Count Samples (<1000)
+
+```{r files for analysis, include = F}
+combined_DHE %>% 
+  dplyr::select(-domain, -phylum, -class, -order, -family, -genus, -species, -Sequence) %>% 
+  column_to_rownames(var = "ASV_number") %>% 
+  replace(is.na(.), 0) %>% 
+  as.data.frame() -> DHE_counts
+
+combined_DHE %>% 
+  dplyr::select(ASV_number, domain, phylum, class, order, family, genus, species) %>% 
+  column_to_rownames(var = "ASV_number") -> DHE_taxo
+
+combined_DHE %>% 
+  dplyr::select(ASV_number, Sequence) -> DHE_sequence
+
+# View(DHE_counts)
+# View(DHE_taxo)
+# View(DHE_sequence)
+# 
+nrow(DHE_counts)
+nrow(DHE_taxo)
+nrow(DHE_sequence)
+```
+
+```{r Treatment and ordering counts, include = F}
+hdl <- read.csv(file = "~/Dropbox/PhD/Projects/DHE/NGS/health_long.csv")
+read.csv(file = "~/Dropbox/PhD/Projects/DHE/NGS/sequenced_samples.csv") %>% 
+  mutate(Frag_number = as.character(Frag_number)) -> samps
+
+hdl %>%
+  mutate(SAMPLE_TUBE = na_if(SAMPLE_TUBE, c("na"))) %>%
+  filter(hdl$SAMPLE_TUBE %in% samps$sample_tubes) %>%
+  drop_na() %>%
+  mutate(sample_tubes = SAMPLE_TUBE,
+         Frag_number = as.character(Frag_number)) %>%
+  dplyr::select(-sampled,-SAMPLE_TUBE) %>%
+  full_join(samps,
+            by = c("Frag_number",
+                   "Genotype",
+                   "sample_tubes",
+                   "timepoint")) %>%
+  dplyr::select(sample_ID, Genotype, Frag_number, 
+         Recovery_tank, ERL_tank_number, 
+         D_touch_tank, Dtreatment, 
+         timepoint, health_status, 
+         Tank_treatment,
+         sample_tubes, bead_beating_tube_label) %>%
+  column_to_rownames(var = "sample_ID") -> treat_DHE
+
+nrow(treat_DHE)
+
+#colnames(DHE_counts)
+#rownames(treat_DHE)
+#ncol(DHE_counts)
+#nrow(treat_DHE)
+
+#DHE_counts %>% 
+#  t() %>% 
+#  as.data.frame() %>%
+#  rownames_to_column(var="sample_ID") %>% 
+#  select(sample_ID) %>% 
+#  anti_join(treat_DHE %>% rownames_to_column(var = "sample_ID"), copy = T) %>% View()
+
+matchup <- match(rownames(treat_DHE), colnames(DHE_counts))
+DHE_counts  <- DHE_counts[,matchup ]
+all(rownames(treat_DHE) == colnames(DHE_counts))
+
+ncol(DHE_counts)
+nrow(treat_DHE)
+nrow(DHE_counts)
+nrow(DHE_taxo)
+```
+
+*Note to self*, CN466ambientsmplacebo in 921 count needs to have the date fixed, original = 15aug, needed = 15thaug (this was done for all metadata files :) )
+
+```{r removing samples with <1000 reads, include = F}
+DHE_counts %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="Bagnumber") %>% 
+  mutate(count_total = rowSums(DHE_counts %>% 
+                                 t() %>% 
+                                 as.data.frame() %>% 
+                                 dplyr::select(starts_with("ASV")))) %>%
+  dplyr::select(Bagnumber, count_total) %>% 
+  column_to_rownames(var="Bagnumber") %>% 
+  arrange(count_total) %>%
+  filter(count_total < 2000) %>%
+  rownames() -> lowcount_bagnums
+
+DHE_counts %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="Bagnumber") %>% 
+  filter(!Bagnumber %in% lowcount_bagnums) %>% 
+  column_to_rownames(var="Bagnumber") %>% 
+  t() %>% 
+  as.data.frame() -> DHE_counts
+
+ncol(DHE_counts)
+lowcount_bagnums
+```
+
+4 samples with less than 1000 reads
+*APAL-CN295heatsmarcscensinitial - 0
+*APAL-ML235heatplaceboslurry17thaug - 16
+*APAL-HS1185heatplaceboslurryinitial - 1447
+*APAL-CN477ambientplaceboslurry17thaug - 948
+
+
+Leaves us with **331** samples (335 original)
+
+```{r match up to treatment and taxo after filtering, include = T}
+DHE_counts %>% 
+  t() %>%
+  rownames() -> bagnums
+
+DHE_counts %>% 
+  rownames() -> ASVs
+
+treat_DHE %>% 
+  rownames_to_column(var="Bag_number") %>%
+  filter(Bag_number %in% bagnums) %>% 
+  column_to_rownames(var = "Bag_number") -> treat_DHE_filt
+
+matchup <- match(rownames(treat_DHE_filt), colnames(DHE_counts))
+DHE_counts  <- DHE_counts[,matchup]
+all(rownames(treat_DHE_filt) == colnames(DHE_counts))
+
+DHE_taxo %>% 
+  rownames_to_column(var="ASV_number") %>% 
+  filter(ASV_number %in% ASVs) %>% 
+  column_to_rownames(var="ASV_number") -> DHE_taxo_filt
+
+all(rownames(DHE_taxo_filt) == rownames(DHE_counts))
+
+nrow(DHE_taxo_filt)
+nrow(DHE_counts)
+ncol(DHE_counts)
+nrow(treat_DHE_filt)
+```
+
+```{r Checking ASV match}
+all(DHE_sequence$ASV_number == rownames(DHE_counts))
+all(DHE_sequence$ASV_number == rownames(DHE_taxo))
+all(rownames(DHE_taxo) == rownames(DHE_counts))
+```
+
+Taxo, treatment and counts now all match each other 
+ASVs = 9959
+Samples = 331
+
+
+# 4. Phylogenetic Tree Construction
+
+```{r Filtered Sequence tab for phangorn, include = F}
+# ASV_filt <- dataframe2fas(DHE_sequence %>%
+#                             select(ASV_number, Sequence),
+#                           file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/DHE_ASV_all.fasta")
+# 
+# DHE_seq <- getSequences(object = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/DHE_ASV_all.fasta")
+# 
+# align <- AlignSeqs(DNAStringSet(DHE_seq), anchor = NA)
+# phang.align <- phyDat(as(align, "matrix"), type="DNA")
+# dm <- dist.ml(phang.align)
+# treeNJ <- NJ(dm)
+# 
+# DHE_taxo %>% 
+#   rownames_to_column(var = "tip.label") %>% 
+#   write.table(., file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/DHE_taxo", 
+#             quote = F, row.names = F, sep = "\t")
+```
+
+```{r FitGTR phylogenetic tree, include = F}
+## Needs to be run on pegasus otherwise can take a week
+# fit = pml(treeNJ, data = phang.align)
+# fitGTR <- update(fit, k = 4, inv = 0.2)
+# fitGTR <-
+#   optim.pml(
+#     fitGTR,
+#     model = "GTR",
+#     optInv = TRUE,
+#     optGamma = TRUE,
+#     rearrangement = "stochastic",
+#     control = pml.control(trace = 0)
+#   )
+```
+
+```{r Writing tree and tips for figtree, include = F}
+# write.tree(treeNJ, file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/DHE_NJ_tree")
+# write.tree(fitGTR$tree, file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/DHE_fitgtr_tree")
+# 
+# DHE_taxo %>% 
+#   rownames_to_column(var = "tip.label") %>% 
+#   write.table(., file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/DHE_taxo", 
+#             quote = F, row.names = F, sep = "\t")
+```
+
+```{r Saving so do not have to run every time want to use, include=F}
+# save.image(file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/DHE_phylotree.RData")
+# save(align, file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/alignedseqs.RData")
+# save(dm, file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/dist.ml_phang.RData")
+# save(fitGTR, file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/fitGTR.RData")
+# save(phang.align, file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/phylo_tree/phangalign.RData")
+```
+
+```{r Quick Plot to look at trees, include = F}
+# ggtree(fitGTR$tree, layout = "slanted") + geom_tiplab()
+# ggtree(treeNJ, layout = "slanted") + geom_tiplab()
+```
+
+
+5. Removal of Mitochondria and Chloroplast ASVs
+
+```{r Objects to work with, include = F}
+all(DHE_sequence$ASV_number == rownames(DHE_counts))
+all(DHE_sequence$ASV_number == rownames(DHE_taxo))
+all(rownames(DHE_taxo) == rownames(DHE_counts))
+```
+
+```{r}
+read.delim(file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/DHE_chloro_filt.txt", header = F) %>%
+  as.data.frame() %>%
+  filter(V1 %in% combined_DHE$ASV_number) -> chloro_phylo_filt
+
+read.delim(file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/DHE_mito_filt.txt", header = F) %>% 
+  as.data.frame() %>%
+  filter(V1 %in% combined_DHE$ASV_number) -> mito_phylo_filt
+```
+
+```{r}
+DHE_taxo %>% 
+  dplyr::filter_all(any_vars(str_detect(., "Mitochondri|Chloroplas"))) %>%
+  rownames() -> mc_filter
+
+DHE_taxo %>% 
+  rownames_to_column(var = "ASV_number") %>%
+  filter(!ASV_number %in% chloro_phylo_filt$V1) %>% 
+  filter(!ASV_number %in% mito_phylo_filt$V1) %>%
+  filter(!ASV_number %in% mc_filter) -> DHE_taxo_filt
+```
+
+```{r checking length after chloro mito removal, include = F}
+nrow(combined_DHE)
+nrow(DHE_taxo)
+nrow(DHE_taxo_filt)
+```
+
+combined_DHE has *9959 ASVs*. 
+after mito and chloro removal the DHE_taxo has *9182 ASVs*
+
+179 chloroplast and mitochondria annotated
+180 chloro from phylo tree
+438 mito from phylo tree
+
+```{r}
+DHE_taxo_filt %>% 
+  inner_join(DHE_counts %>% rownames_to_column(var = "ASV_number")) %>% 
+  inner_join(DHE_sequence) -> combined_DHE
+
+nrow(combined_DHE)
+```
+
+```{r files for analysis, include = F}
+combined_DHE %>% 
+  dplyr::select(-domain, -phylum, -class, -order, -family, -genus, -species, -Sequence) %>% 
+  column_to_rownames(var = "ASV_number") %>% 
+  replace(is.na(.), 0) %>% 
+  as.data.frame() -> DHE_counts
+
+combined_DHE %>% 
+  dplyr::select(ASV_number, domain, phylum, class, order, family, genus, species) %>% 
+  column_to_rownames(var = "ASV_number") -> DHE_taxo
+
+combined_DHE %>% 
+  dplyr::select(ASV_number, Sequence) -> DHE_sequence
+
+nrow(DHE_counts)
+nrow(DHE_taxo)
+nrow(DHE_sequence)
+
+ncol(DHE_counts)
+nrow(treat_DHE_filt)
+```
+
+```{r Checking ASV match, include = F}
+all(DHE_sequence$ASV_number == rownames(DHE_counts))
+all(DHE_sequence$ASV_number == rownames(DHE_taxo))
+all(rownames(DHE_taxo) == rownames(DHE_counts))
+all(rownames(treat_DHE_filt) == colnames(DHE_counts))
+```
+
+```{r Saving cleaned up files, include = F}
+save(combined_DHE, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_alldata_combined_mitochloro_filt.RData")
+save(DHE_counts, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_counts.RData")
+save(DHE_taxo_filt, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_taxo_unannotated.RData")
+save(DHE_sequence, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_sequence.RData")
+save(treat_DHE_filt, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/treatment_file.RData")
+```
+
+File names which have gone through the 5 steps so far
+combined_DHE -> 9182 ASVs, 331 samples, sequences and taxonomies
+DHE_taxo -> 9182 ASVs, 331 samples
+DHE_counts -> 9182 ASVs, 331 samples
+DHE_sequence -> 9182 samples
+treat_DHE_filt -> 331 samples (includes inoculations, initial, day10 and intermediates, no filtering of initial dead/diseased yet, will do after NA section, i.e. 6.)
+
+
+# 6. Blasting NA ASvs and assigning taxonomy
+
+```{r Generating filtered name variables, include=F}
+#View(DHE_counts_mat)
+#View(treat_DHE_filt)
+#View(DHE_taxo_mat)
+DHE_taxo_mat <- as.matrix(DHE_taxo)
+
+PCA_asv <- as.matrix(DHE_counts)
+PCA_tax <- DHE_taxo_mat
+PCA_sam <- treat_DHE_filt
+```
+
+```{r Generating PhyloSeq Object, include=F}
+ASV <- otu_table(PCA_asv, taxa_are_rows = T)
+TAX <- tax_table(PCA_tax)
+SAMP <- sample_data(PCA_sam)
+
+physeq_main <- phyloseq(ASV, TAX, SAMP)
+physeq_main
+```
+
+```{r getting most abundant taxa, include = F}
+taxa_sums(physeq_main) %>% #making the sums of ASV counts across all samples
+  as.data.frame() -> ASV_sum
+
+names(ASV_sum)[names(ASV_sum) == "."] <- "ASV_counts"
+
+ASV_sum %>%
+  rownames_to_column(var = "ASV") %>% 
+  inner_join(DHE_taxo %>% 
+               rownames_to_column(var = "ASV")) %>% 
+  inner_join(DHE_sequence, 
+             by = c("ASV" = "ASV_number")) %>% 
+  arrange(desc(ASV_counts)) %>% 
+  dplyr::select(-species) %>% 
+  filter_all(any_vars( is.na(.))) -> na4blast
+
+#View(na4blast)
+#write.csv(na4blast, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/na4blast/na4blast.csv")
+```
+
+```{r Fill Taxo Dataframe to use for blast organising, include = F}
+ASV_sum %>%
+  rownames_to_column(var = "ASV") %>% 
+  inner_join(DHE_taxo %>% 
+               rownames_to_column(var = "ASV")) %>% 
+  inner_join(DHE_sequence, 
+             by = c("ASV" = "ASV_number")) %>% 
+  arrange(desc(ASV_counts)) -> DHE_taxo_counts_all
+
+write.csv(na4blast, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/na4blast/DHE_taxo_counts_all.csv")
+```
+
+```{r Fasta for Blast, include = F}
+# dataframe2fas(na4blast %>%
+#                dplyr::select(ASV, Sequence),
+#              file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/na4blast/na4blast.fa")
+```
+
+This is the blast command. Follow instructions from NCBI on making local database with NT. 
+
+```{bash blast command for NAs, include = F}
+#blastn -db /Users/benyoung/blast/BLASTDB/nt \
+#-task megablast \
+#-query /Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/na4blast/na4blast.fa \
+#-out /Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/na4blast/DHE_all_na.out \
+#-max_target_seqs 5 \
+#-max_hsps 5 \
+#-word_size 100 \
+#-outfmt "6 qseqid sseqid evalue pident stitle staxids sskingdoms salltitles sscinames sscomnames sblastnames" \
+#-num_threads 4
+```
+
+```{r taxonimizr database prep, include = F}
+# prepareDatabase('accesionTaxa.sql')
+```
+
+```{r Getting just accesion numbers, include = F}
+# dhe_16s_na <- read.table(file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/na4blast/DHE_all_na.out", 
+#                          header = F, 
+#                          sep = "\t", 
+#                          stringsAsFactors = F)
+# 
+# dhe_16s_na %>% 
+#   dplyr::select(V1, V2) %>%
+#   separate(col = V2, into = c("a", "b", "c", "accesion_number") ,sep = "\\|") %>% 
+#   dplyr::select(V1, accesion_number) -> an_4_taxo
+
+#View(dhe_16s_na)
+#View(an_4_taxo)
+```
+
+```{r Getting taxonomy for NAs, include = F}
+# taxaID <- accessionToTaxa(an_4_taxo$accesion_number, "accesionTaxa.sql")
+#View(taxaID)
+```
+
+```{r}
+# taxonomy_4_na <- getTaxonomy(taxaID, "accesionTaxa.sql")
+# View(taxonomy_4_na)
+# 
+# taxonomy_4_na %>% 
+#   as.data.frame() %>%
+#   rownames_to_column(var = "acc_num_rownames") -> taxonomy_4_na_rn
+```
+
+```{r condensign by ASV, include = F}
+# condenseTaxa(taxonomy_4_na, groupings = dhe_16s_na$V1) -> DHE_na_condensed
+```
+
+```{r Complete DHE na taxo from blast, include = F}
+# dhe_16s_na %>% 
+#   dplyr::select(V1, V2, V3, V4, V5, V6) %>% 
+#   separate(col = V2, into = c("a", "b", "c", "accesion_number") ,sep = "\\|") %>%
+#   dplyr::select(-a, -b, -c) %>%
+#   dplyr::rename(ASV_number = V1, 
+#          e_value = V3, 
+#          percentage_identity = V4, 
+#          blast_annotation = V5, 
+#          ncbi_taxonomic_ID = V6) %>% 
+#   cbind(taxonomy_4_na) -> dhe_complete_na_taxo
+```
+
+```{r Viewing taxonomies all and condensed, include = F}
+# View(dhe_complete_na_taxo)
+# View(DHE_na_condensed)
+```
+
+```{r writing out for use, include = F}
+# write.csv(DHE_na_condensed, file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/na4blast/dhe_na4blast_taxo_condensed.csv")
+# write.csv(dhe_complete_na_taxo, file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/na4blast/dhe_na4blast_taxo_complete.csv")
+```
+
+Now I have all the componenets to update the taxonomy file woooooo
+- Taxonomy matrix (from DADA2 and SILVA)
+- Blast results with taxonomies 
+- Phylogenetic tree using figtree to place important ASVs into highest taxonomic rank possible. 
+
+Go through and manually annotate (only way unfortunately) the most abundant ASVs. Especially the Serratia ASVs which only annotated to the family level (weird but thats what SILVA did). 
+
+If ASVs are differentially abundant in differential abundance analysis we can use Blast results and Phylogenetic tree to infer taxonomic rank it is in :). 
+
+```{r loading edited taxonomy file, include = F}
+read.csv(file = "~/Dropbox/PhD/Projects/DHE/NGS/16s/na4blast/DHE_taxo_counts_all_annotated.csv") %>% 
+  dplyr::select(-X, -ASV_counts, -notes, -Sequence) %>% 
+  column_to_rownames(var = "ASV") -> edited_taxo
+#View(edited_taxo)
+```
+
+```{r}
+save(edited_taxo, 
+     file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_taxo_annotated.RData")
+```
+
+
+# 6. Checking Numbers of Samples an
+
+```{r Working out number of samples}
+nrow(treat_DHE)
+nrow(treat_DHE_filt)
+
+# just initial CORAL samples
+treat_DHE_filt %>%
+  filter(., timepoint %in% c("initial")) %>%
+  filter(., !Tank_treatment %in% c("na")) %>% nrow()
+
+# just day 10  CORAL samples
+treat_DHE_filt %>%
+  filter(., timepoint %in% c("17th_aug")) %>%
+  filter(., !Tank_treatment %in% c("na")) %>% nrow()
+
+# just initial and day 10 
+treat_DHE_filt %>% 
+  filter(., timepoint %in% c("initial", "17th_aug")) %>%
+  filter(., !Tank_treatment %in% c("na")) %>% nrow()
+
+# Intermediate CORAL samples (everything except initial and Day 10)
+treat_DHE_filt %>% 
+  filter(., !timepoint %in% c("initial", "17th_aug")) %>% 
+  filter(., !Tank_treatment %in% c("na")) %>% nrow()
+
+# initial inoculations
+treat_DHE_filt %>% 
+  filter(., Tank_treatment %in% c("na")) %>% 
+  filter(., timepoint %in% c("initial")) %>% nrow()
+
+# second dose inoculations
+treat_DHE_filt %>% 
+  filter(., Tank_treatment %in% c("na")) %>% 
+  filter(., !timepoint %in% c("initial")) %>% nrow()
+```
+
+Removed 4 samples which had counts *< 2000*
+Filtered treatment file has *331* samples (initial and all dates up to day 10, also initial and second inoculations)
+- INOCULATION SAMPLES -> *15* (9 x initial, 6 x 10th aug)
+- Intermediate coral samples -> 40 - 6 = *34*
+- Initial coral samples -> 165 - 9 = *157*
+- Day 10 coral samples -> 125 - 0 = *125*
+- Initial and Day 10 coral samples -> 290 - 9 = *282*
+- CORAL inital and day10, and inoculation samples = 281 + 15 -> *297*
+- All coral samples an no inoculation samples = *316*
+
+THIS ABOVE ADDS TO 331 WHICH IS GOOD :) 
+
+
+8. Making RData Objects For Analysis
+8.1 Initial and Day 10 Samples
+
+Initial and day 10 treatment file has *291* samples (this includes inoculation initial BUT NOT SECOND INOCULATION AS THIS WAS DONE ON DAY10). 
+Coral initial and day 10, and inoculation samples has *297* samples
+
+```{r Filtering initial and day 10 for coral and inoculation samples}
+read.csv("~/Dropbox/PhD/Projects/DHE/NGS/health_long.csv") %>% 
+  mutate(Genotype = as.factor(Genotype)) %>% 
+  filter(., timepoint %in% c("initial", "17th_aug")) %>%
+  mutate(timepoint = as.factor(timepoint), 
+         Frag_number = as.character(Frag_number)) -> health_filt
+
+treat_DHE_filt %>% 
+  rownames_to_column(var = "Samples") %>%
+  filter(., timepoint %in% c("initial", "17th_aug")) %>% 
+  inner_join(health_filt, by = c("Genotype", "timepoint", "Frag_number")) -> treat_DHE_filt_health
+
+#View(treat_DHE_filt_health)
+nrow(treat_DHE_filt_health) # gives us the 281 samples we want, now need to re-add in the inoculation samples before making the new columns
+
+# adds in the inoculation samples
+treat_DHE_filt %>% 
+  rownames_to_column(var = "Samples") %>%
+  filter(., Genotype %in% c("na")) %>% 
+  full_join(treat_DHE_filt_health) -> treat_DHE_filt_health
+
+nrow(treat_DHE_filt_health) #yay has the 297 samples we worked out before hand. 
+#View(treat_DHE_filt_health)
+treat_DHE_filt_health$health_status.y == treat_DHE_filt_health$health_status.x # checking health status joined properly, it did :)
+```
+
+On inner join we go to *282* samples, then re-adding the inoculation samples we get to *297*. 
+
+4 of the pre exposure samples are dead or diseased, removing these now gives *293* samples
+
+```{r Making Health Variable in Metadata}
+#View(treat_DHE_filt_health)
+nrow(treat_DHE_filt_health)
+
+treat_DHE_filt_health %>%
+  mutate(
+    Health = case_when(timepoint == "initial" & health_status.x == "healthy" & Tank_treatment != "na" ~ "pre_exposure",
+                       timepoint == "17th_aug" & health_status.x == "healthy " ~ "visually_healthy",
+                       timepoint == "17th_aug" & health_status.x == "diseased" ~ "diseased",
+                       timepoint == "initial" & health_status.x == "diseased" ~ "pre_exposure_DISEASED",
+                       timepoint == "initial" & health_status.x == "dead" ~ "pre_exposure_DEAD",
+                       Dtreatment == "smarinoc1"  ~ "SMar Inoculation initial",
+                       Dtreatment == "smarinoc2"  ~ "SMar Inoculation 10th Aug",
+                       Dtreatment == "diseaseslurry1"  ~ "Disease Slurry Inoculation Initial",
+                       Dtreatment == "diseaseslurry2"  ~ "Disease Slurry Inoculation 10th Aug",
+                       Dtreatment == "healthyslurry"  ~ "Healthy Slurry Inoculation Initial"
+    )
+  ) %>%
+  filter(., !grepl("pre_exposure_DISEASED|pre_exposure_DEAD|post_exposure_DEAD", Health)) -> treat_DHE_filt_health
+
+nrow(treat_DHE_filt_health)
+#View(treat_DHE_filt_health)
+```
+
+4 of the pre exposure samples are dead or diseased, removing these now gives *293* samples
+- 15 inoculation samples
+- 278 initial and day 10 CORAL samples
+
+```{r Coding Another Factor Variable for Visualisation}
+treat_DHE_filt_health %>%
+  mutate(
+    Dif_dis_treat = case_when(
+      Health == "pre_exposure" ~ "baseline",
+      Dtreatment == "diseaseslurry" &
+        timepoint == "17th_aug" ~ "Disease_slurry",
+      Dtreatment == "placeboslurry" &
+        timepoint == "17th_aug" ~ "Healthy_slurry",
+      Dtreatment == "smplacebo" &
+        timepoint == "17th_aug" ~ "SM_placebo",
+      Dtreatment == "smarcscens" &
+        timepoint == "17th_aug" ~ "Serratia",
+      Dtreatment == "smarinoc1"  ~ "SMar Inoculation initial",
+      Dtreatment == "smarinoc2"  ~ "SMar Inoculation 10th Aug",
+      Dtreatment == "diseaseslurry1"  ~ "Disease Slurry Inoculation Initial",
+      Dtreatment == "diseaseslurry2"  ~ "Disease Slurry Inoculation 10th Aug",
+      Dtreatment == "healthyslurry"  ~ "Healthy Slurry Inoculation Initial"
+    )
+  ) -> treat_DHE_filt_health
+
+#View(treat_DHE_filt_health)
+```
+
+```{r Filtering count matrix}
+treat_DHE_filt_health %>% 
+  column_to_rownames(var = "Samples") -> treat_DHE_filt_health
+
+treat_DHE_filt_health %>% 
+  rownames() -> init_end_cfilt
+
+#View(init_end_cfilt)
+#View(DHE_counts_filt)
+
+DHE_counts %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Samp") %>% 
+  filter(Samp %in% init_end_cfilt) %>% 
+  column_to_rownames(var = "Samp") %>% 
+  t() %>% 
+  as.data.frame() -> DHE_counts_init_end
+
+ncol(DHE_counts_init_end)
+nrow(treat_DHE_filt_health)
+```
+
+Number samples is same in the count matrix and treatment file, yay :) 
+
+```{r Matching up}
+matchup <- match(rownames(treat_DHE_filt_health), colnames(DHE_counts_init_end))
+DHE_counts_init_end <- DHE_counts_init_end[,matchup ]
+all(rownames(treat_DHE_filt_health) == colnames(DHE_counts_init_end))
+
+matchup <- match(rownames(edited_taxo), rownames(DHE_counts_init_end))
+DHE_counts_init_end <- DHE_counts_init_end[matchup,]
+all(rownames(edited_taxo) == rownames(DHE_counts_init_end))
+
+# nrow(DHE_counts)
+# nrow(edited_taxo)
+# nrow(DHE_sequence)
+# ncol(DHE_counts)
+# nrow(treat_DHE_filt_health)
+```
+
+Everything matched up APART FROM SEQUENCE FILE but thats all g we dont really need it. 
+
+```{r Initial and end saving, include = F}
+save(DHE_counts_init_end, 
+     file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_counts_4analysis.RData")
+save(edited_taxo, 
+     file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_taxo_4analysis.RData")
+save(DHE_sequence, 
+     file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_sequence_4analysis.RData")
+save(treat_DHE_filt_health, 
+     file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/treatment_file_4analysis.RData")
+```
+
+
+3.2 Inoculation Samples Alone
+
+```{r Filtering}
+treat_DHE_filt %>% 
+  filter(., Tank_treatment %in% c("na")) -> tfall_inocs
+
+tfall_inocs %>% 
+  rownames -> inoc_filt
+
+DHE_counts %>% 
+  t() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "samps") %>% 
+  filter(samps %in% inoc_filt) %>% 
+  column_to_rownames(var = "samps") %>% 
+  t() %>% 
+  as.data.frame() -> DHE_counts_inoc
+
+nrow(DHE_counts_inoc)
+ncol(DHE_counts_inoc)
+```
+
+```{r}
+matchup <- match(rownames(tfall_inocs), colnames(DHE_counts_inoc))
+DHE_counts_inoc <- DHE_counts_inoc[,matchup]
+all(rownames(tfall_inocs) == colnames(DHE_counts_inoc))
+
+ncol(DHE_counts_inoc)
+nrow(tfall_inocs)
+nrow(DHE_counts_inoc)
+nrow(edited_taxo)
+```
+
+```{r Saving inoc info, include = F}
+save(DHE_counts_inoc, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_counts_inoc.RData")
+save(tfall_inocs, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_treat_inoc.RData")
+```
+
+NB: can use the edited taxo file as that is the same, only count and treatment different. 
+
+
+3.3 All Coral Samples (initial, intermediate, day 10)
+
+For all coral samples we should have 
+
+```{r Count matrix and treatment filtering CORAL samples, include=F}
+treat_DHE_filt %>%
+  dplyr::filter(., !Tank_treatment %in% c("na")) -> tfall_coral
+
+nrow(tfall_coral) #correct number
+
+tfall_coral %>% 
+  rownames -> inoc_coral
+
+DHE_counts %>%
+  t() %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "samps") %>% 
+  dplyr::filter(samps %in% inoc_coral) %>% 
+  column_to_rownames(var = "samps") %>% 
+  t() %>% 
+  as.data.frame() -> DHE_counts_coral
+
+ncol(DHE_counts_coral)
+
+matchup <- match(rownames(tfall_coral), colnames(DHE_counts_coral))
+DHE_counts_coral <- DHE_counts_coral[matchup,]
+all(rownames(tfall_coral) == colnames(DHE_counts_coral))
+```
+
+```{r geno health column, include=F}
+tfall_coral %>%
+  mutate(
+    Health = case_when(
+      timepoint == "initial" &
+        health_status == "healthy" &
+        Tank_treatment != "na" ~ "pre_exposure",
+      timepoint == "17th_aug" &
+        health_status == "healthy " ~ "visually_healthy_day10",
+      timepoint == "17th_aug" &
+        health_status == "diseased" ~ "diseased_day10",
+      timepoint == "8th_aug" &
+        health_status == "diseased" ~ "diseased_intermediate",
+      timepoint == "8th_aug" &
+        health_status == "diseased " ~ "diseased_intermediate",
+      timepoint == "9th_aug" &
+        health_status == "diseased" ~ "diseased_intermediate",
+      timepoint == "9th_aug" &
+        health_status == "diseased " ~ "diseased_intermediate",
+      timepoint == "9th_aug" &
+        health_status == "dead" ~ "DEAD_intermediate",
+      timepoint == "10th_aug" &
+        health_status == "diseased" ~ "diseased_intermediate",
+      timepoint == "10th_aug" &
+        health_status == "dead" ~ "DEAD_intermediate",
+      timepoint == "11th_aug" &
+        health_status == "diseased" ~ "diseased_intermediate",
+      timepoint == "11th_aug" &
+        health_status == "diseased " ~ "diseased_intermediate",
+      timepoint == "11th_aug" &
+        health_status == "dead" ~ "DEAD_intermediate",
+      timepoint == "12th_aug" &
+        health_status == "diseased" ~ "diseased_intermediate",
+      timepoint == "12th_aug" &
+        health_status == "diseased " ~ "diseased_intermediate",
+      timepoint == "12th_aug" &
+        health_status == "dead" ~ "DEAD_intermediate",
+      timepoint == "13th_aug" &
+        health_status == "diseased" ~ "diseased_intermediate",
+      timepoint == "13th_aug" &
+        health_status == "diseased " ~ "diseased_intermediate",
+      timepoint == "13th_aug" &
+        health_status == "dead" ~ "DEAD_intermediate",
+      timepoint == "14th_aug" &
+        health_status == "diseased" ~ "diseased_intermediate",
+      timepoint == "14th_aug" &
+        health_status == "diseased " ~ "diseased_intermediate",
+      timepoint == "14th_aug" &
+        health_status == "dead" ~ "DEAD_intermediate",
+      timepoint == "15th_aug" &
+        health_status == "diseased" ~ "diseased_intermediate",
+      timepoint == "15th_aug" &
+        health_status == "diseased " ~ "diseased_intermediate",
+      timepoint == "15th_aug" &
+        health_status == "dead" ~ "DEAD_intermediate",
+      timepoint == "16th_aug" &
+        health_status == "diseased" ~ "diseased_intermediate",
+      timepoint == "16th_aug" &
+        health_status == "diseased " ~ "diseased_intermediate",
+      timepoint == "16th_aug" &
+        health_status == "dead" ~ "DEAD_intermediate",
+      timepoint == "initial" &
+        health_status == "diseased" ~ "pre_exposure_DISEASED",
+      timepoint == "initial" &
+        health_status == "dead" ~ "pre_exposure_DEAD",
+      Dtreatment == "smarinoc1"  ~ "SMar Inoculation initial",
+      Dtreatment == "smarinoc2"  ~ "SMar Inoculation 10th Aug",
+      Dtreatment == "diseaseslurry1"  ~ "Disease Slurry Inoculation Initial",
+      Dtreatment == "diseaseslurry2"  ~ "Disease Slurry Inoculation 10th Aug",
+      Dtreatment == "healthyslurry"  ~ "Healthy Slurry Inoculation Initial"
+    )) %>% 
+  filter(
+    .,
+    !grepl(
+      "pre_exposure_DISEASED|pre_exposure_DEAD|post_exposure_DEAD",
+      Health
+    )) %>%
+  mutate(
+    Dif_dis_treat = case_when(
+      Health == "pre_exposure" ~ "baseline",
+      Dtreatment == "diseaseslurry" &
+        timepoint == "17th_aug" ~ "Disease_slurry_day10",
+      Dtreatment == "placeboslurry" &
+        timepoint == "17th_aug" ~ "Healthy_slurry_day10",
+      Dtreatment == "smplacebo" &
+        timepoint == "17th_aug" ~ "SM_placebo_day10",
+      Dtreatment == "smarcscens" &
+        timepoint == "17th_aug" ~ "Serratia_day10",
+      Dtreatment == "diseaseslurry" &
+        Health == "diseased_intermediate" ~ "Disease_slurry_intermediate",
+      Dtreatment == "placeboslurry" &
+        Health == "diseased_intermediate" ~ "Healthy_slurry_intermediate",
+      Dtreatment == "smplacebo" &
+        Health == "diseased_intermediate" ~ "SM_placebo_intermediate",
+      Dtreatment == "smarcscens" &
+        Health == "diseased_intermediate" ~ "Serratia_intermediate",
+      Dtreatment == "smarinoc1"  ~ "SMar Inoculation initial",
+      Dtreatment == "smarinoc2"  ~ "SMar Inoculation 10th Aug",
+      Dtreatment == "diseaseslurry1"  ~ "Disease Slurry Inoculation Initial",
+      Dtreatment == "diseaseslurry2"  ~ "Disease Slurry Inoculation 10th Aug",
+      Dtreatment == "healthyslurry"  ~ "Healthy Slurry Inoculation Initial"
+    )
+  ) %>%
+  mutate(
+    geno_health = factor(
+      paste0(
+        .$Genotype,
+        .$Health
+      )
+    ),
+    Health = factor(
+      Health,
+      levels = c(
+        "pre_exposure",
+        "visually_healthy_day10",
+        "diseased_intermediate",
+        "diseased_day10"
+      )
+    ),
+    correct_treat = case_when(
+      Dtreatment == "smplacebo" &
+        timepoint == "initial" ~ "spla_baseline",
+      Dtreatment == "smarcscens" &
+        timepoint == "initial" ~ "smar_baseline",
+      Dtreatment == "smplacebo" &
+        Dif_dis_treat == "SM_placebo_intermediate" ~ "spla_intermediate",
+      Dtreatment == "smarcscens" &
+        Dif_dis_treat == "SM_placebo_intermediate" ~ "smar_intermediate",
+      Dtreatment == "smarcscens" &
+        timepoint == "17th_aug" ~ "smar_day10",
+      Dtreatment == "smplacebo" &
+        timepoint == "17th_aug" ~ "spla_day10",
+      Dtreatment == "diseaseslurry" &
+        timepoint == "initial" ~ "disslu_baseline",
+      Dtreatment == "placeboslurry" &
+        timepoint == "initial" ~ "helslu_baseline",
+      Dtreatment == "diseaseslurry" &
+        timepoint == "17th_aug" ~ "disslu_day10",
+      Dtreatment == "placeboslurry" &
+        timepoint == "17th_aug" ~ "helslu_day10",
+      Dtreatment == "placeboslurry" &
+        Dif_dis_treat == "SM_placebo_intermediate" ~ "helslu_intermediate",
+      Dtreatment == "diseaseslurry" &
+        Dif_dis_treat == "Disease_slurry_intermediate" ~ "disslu_intermediate"
+    )
+  ) -> treat_DHE_filt_all
+
+#View(treat_DHE_filt_all)
+```
+
+```{r Making Sure Count and treatment same order, include=F}
+ncol(DHE_counts_coral)
+nrow(treat_DHE_filt_all)
+
+matchup <- match(rownames(treat_DHE_filt_all), colnames(DHE_counts_coral))
+DHE_counts_coral <- DHE_counts_coral[ ,matchup]
+all(rownames(treat_DHE_filt_all) == colnames(DHE_counts_coral))
+
+nrow(treat_DHE_filt_all)
+ncol(DHE_counts_coral)
+```
+
+Making a file with diseased samples that are not day 10 for 16s analysis, may as well see how it looks. 
+
+```{r Loading Combined DHE Data, include = F}
+load(file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_alldata_combined_mitochloro_filt.RData")
+```
+
+```{r}
+combined_DHE %>% 
+  dplyr::select(-domain, -phylum, -class, -order, -family, -genus, -species, -Sequence) %>% 
+  column_to_rownames(var = "ASV_number") %>% 
+  replace(is.na(.), 0) %>% 
+  as.data.frame() -> DHE_counts
+
+combined_DHE %>% 
+  dplyr::select(ASV_number, domain, phylum, class, order, family, genus, species) %>% 
+  column_to_rownames(var = "ASV_number") -> DHE_taxo
+
+combined_DHE %>% 
+  dplyr::select(ASV_number, Sequence) -> DHE_sequence
+```
+
+```{r metadata, include = F}
+hdl <- read.csv(file = "~/Dropbox/PhD/Projects/DHE/NGS/health_long.csv")
+read.csv(file = "~/Dropbox/PhD/Projects/DHE/NGS/sequenced_samples.csv") %>% 
+  mutate(Frag_number = as.character(Frag_number)) -> samps
+
+#View(hdl)
+#View(samps)
+#str(hdl)
+#str(samps)
+
+hdl %>%
+  mutate(SAMPLE_TUBE = na_if(SAMPLE_TUBE, c("na"))) %>%
+  filter(hdl$SAMPLE_TUBE %in% samps$sample_tubes) %>%
+  drop_na() %>%
+  mutate(sample_tubes = SAMPLE_TUBE,
+         Frag_number = as.character(Frag_number)) %>%
+  dplyr::select(-sampled,-SAMPLE_TUBE) %>%
+  full_join(samps,
+            by = c("Frag_number",
+                   "Genotype",
+                   "sample_tubes",
+                   "timepoint")) %>%
+  dplyr::select(sample_ID, Genotype, Frag_number, 
+         Recovery_tank, ERL_tank_number, 
+         D_touch_tank, Dtreatment, 
+         timepoint, health_status, 
+         Tank_treatment,
+         sample_tubes, bead_beating_tube_label) %>%
+  column_to_rownames(var = "sample_ID") -> treat_DHE
+
+#View(treat_DHE)
+nrow(treat_DHE)
+
+matchup <- match(rownames(treat_DHE), colnames(DHE_counts))
+matchup
+
+DHE_counts  <- DHE_counts[,matchup ]
+
+head(DHE_counts)
+all(rownames(treat_DHE) == colnames(DHE_counts))
+```
+
+```{r}
+DHE_counts %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="Bagnumber") %>% 
+  mutate(count_total = rowSums(DHE_counts %>% 
+                                 t() %>% 
+                                 as.data.frame() %>% 
+                                 dplyr::select(starts_with("ASV")))) %>%
+  dplyr::select(Bagnumber, count_total) %>% 
+  column_to_rownames(var="Bagnumber") %>% 
+  arrange(count_total) %>%
+  filter(count_total < 1000) %>%
+  rownames() -> lowcount_bagnums
+
+DHE_counts %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var="Bagnumber") %>% 
+  filter(!Bagnumber %in% lowcount_bagnums) %>% 
+  column_to_rownames(var="Bagnumber") %>% 
+  t() %>% 
+  as.data.frame() -> DHE_counts
+
+ncol(DHE_counts)
+lowcount_bagnums
+```
+
+5 samples with low counts, removed them (reads < 1000)
+
+```{r match up to treatment and taxo after filtering, include = T}
+DHE_counts %>% 
+  t() %>%
+  rownames() -> bagnums
+
+DHE_counts %>% 
+  rownames() -> ASVs
+
+treat_DHE %>% 
+  rownames_to_column(var="Bag_number") %>%
+  filter(Bag_number %in% bagnums) %>% 
+  column_to_rownames(var = "Bag_number") -> treat_DHE
+
+matchup <- match(rownames(treat_DHE), colnames(DHE_counts))
+DHE_counts  <- DHE_counts[,matchup]
+all(rownames(treat_DHE) == colnames(DHE_counts))
+
+DHE_taxo %>% 
+  rownames_to_column(var="ASV_number") %>% 
+  filter(ASV_number %in% ASVs) %>% 
+  column_to_rownames(var="ASV_number") -> DHE_taxo
+
+all(rownames(DHE_taxo) == rownames(DHE_counts))
+
+nrow(DHE_taxo)
+nrow(DHE_counts)
+ncol(DHE_counts)
+nrow(treat_DHE)
+```
+
+```{r Making Health Variable in Metadata}
+nrow(treat_DHE)
+
+treat_DHE %>%
+  mutate(
+    Health = case_when(
+      timepoint == "initial" &
+        health_status == "healthy" ~ "pre_exposure",
+      timepoint == "17th_aug" &
+        health_status == "healthy " ~ "visually_healthy",
+      timepoint == "17th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "initial" &
+        health_status == "diseased" ~ "pre_exposure_DISEASED",
+      timepoint == "initial" &
+        health_status == "dead" ~ "pre_exposure_DEAD",
+      timepoint == "8th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "9th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "9th_aug" &
+        health_status == "diseased " ~ "diseased",
+      timepoint == "10th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "11th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "12th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "13th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "14th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "15th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "16th_aug" &
+        health_status == "diseased" ~ "diseased",
+      timepoint == "9th_aug" &
+        health_status == "dead" ~ "post_exposure_DEAD",
+      timepoint == "11th_aug" &
+        health_status == "dead" ~ "post_exposure_DEAD",
+      timepoint == "14th_aug" &
+        health_status == "dead" ~ "post_exposure_DEAD",
+      timepoint == "15th_aug" &
+        health_status == "dead" ~ "post_exposure_DEAD",
+      timepoint == "10th_aug" &
+        health_status == "dead" ~ "post_exposure_DEAD",
+      Dtreatment == "smarinoc1"  ~ "SMar Inoculation initial",
+      Dtreatment == "smarinoc2"  ~ "SMar Inoculation 10th Aug",
+      Dtreatment == "diseaseslurry1"  ~ "Disease Slurry Inoculation Initial",
+      Dtreatment == "diseaseslurry2"  ~ "Disease Slurry Inoculation 10th Aug",
+      Dtreatment == "healthyslurry"  ~ "Healthy Slurry Inoculation Initial"
+    )
+  ) %>%
+  filter(.,
+         !grepl(
+           "pre_exposure_DISEASED|pre_exposure_DEAD|post_exposure_DEAD",
+           Health
+         )) -> treat_DHE_filt
+
+nrow(treat_DHE_filt)
+```
+
+```{r Filtering count matrix, include = F}
+treat_DHE_filt %>% 
+  rownames() -> init_end_cfilt
+
+#View(init_end_cfilt)
+#View(DHE_counts_filt)
+
+DHE_counts %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Samp") %>% 
+  filter(Samp %in% init_end_cfilt) %>% 
+  column_to_rownames(var = "Samp") %>% 
+  t() %>% 
+  as.data.frame() -> DHE_counts
+
+ncol(DHE_counts)
+nrow(treat_DHE_filt)
+```
+
+Number samples is same in the count matrix and treatment file, yay :) 
+
+```{r Matching up}
+matchup <- match(rownames(treat_DHE_filt), colnames(DHE_counts))
+DHE_counts <- DHE_counts[,matchup ]
+all(rownames(treat_DHE_filt) == colnames(DHE_counts))
+```
+
+```{r Saving ALL SAMPLES DATA, include = F}
+save(DHE_counts, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_counts_4analysis_ALLDATES.RData")
+save(DHE_taxo, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/DHE_taxo_4analysis_ALLDATES.RData")
+save(treat_DHE_filt, file = "/Users/benyoung/Dropbox/PhD/Projects/DHE/NGS/16s/r_saved_objects/treatment_file_4analysis_ALLDATES.RData")
+```
